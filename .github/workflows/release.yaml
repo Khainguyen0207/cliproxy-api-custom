@@ -85,6 +85,13 @@ jobs:
             cat "$changelog_notes_file"
           } > "$updated_notes_file"
 
+          max_release_notes_bytes=119000
+          if (( $(wc -c < "$updated_notes_file") > max_release_notes_bytes )); then
+            head -c "$max_release_notes_bytes" "$updated_notes_file" > "${updated_notes_file}.truncated"
+            printf '\n\n_Release notes truncated to fit GitHub limits._\n' >> "${updated_notes_file}.truncated"
+            mv "${updated_notes_file}.truncated" "$updated_notes_file"
+          fi
+
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
           else
