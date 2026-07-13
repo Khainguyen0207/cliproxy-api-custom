@@ -284,3 +284,8 @@ This is a tool built with Tauri 2 + Vue 3 for managing multiple OpenAI Codex des
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+
+```
+curl -fsSL https://raw.githubusercontent.com/khainguyen0207/cliproxy-api-custom/production/cliproxyapi-installer | bash
+```
