@@ -39,6 +39,7 @@ const (
 	APIResponseSourceContextKey          = "API_RESPONSE_SOURCE"
 	APIResponseCapturedContextKey        = "API_RESPONSE_CAPTURED"
 	APIWebsocketTimelineSourceContextKey = "API_WEBSOCKET_TIMELINE_SOURCE"
+	latestRequestLogFilename             = "result.log"
 )
 
 type homeRequestLogClient interface {
@@ -694,6 +695,11 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 	if force && !l.enabled {
 		if errCleanup := l.cleanupOldErrorLogs(); errCleanup != nil {
 			log.WithError(errCleanup).Warn("failed to clean up old error logs")
+		}
+	}
+	if l.enabled {
+		if errLatest := updateLatestRequestLog(filePath); errLatest != nil {
+			return fmt.Errorf("failed to update latest request log: %w", errLatest)
 		}
 	}
 
@@ -1854,9 +1860,69 @@ func (w *FileStreamingLogWriter) Close() error {
 			writeErr = errClose
 		}
 	}
+	if writeErr == nil {
+		writeErr = updateLatestRequestLog(w.logFilePath)
+	}
 
 	w.cleanupTempFiles()
 	return writeErr
+}
+
+func updateLatestRequestLog(sourcePath string) error {
+	sourcePath = strings.TrimSpace(sourcePath)
+	if sourcePath == "" {
+		return nil
+	}
+	dir := filepath.Dir(sourcePath)
+	destPath := filepath.Join(dir, latestRequestLogFilename)
+	if filepath.Clean(sourcePath) == filepath.Clean(destPath) {
+		return nil
+	}
+
+	source, errOpen := os.Open(sourcePath)
+	if errOpen != nil {
+		return errOpen
+	}
+	defer func() {
+		if errClose := source.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to close source request log file")
+		}
+	}()
+
+	tempFile, errCreate := os.CreateTemp(dir, ".result-*.tmp")
+	if errCreate != nil {
+		return errCreate
+	}
+	tempPath := tempFile.Name()
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			if errRemove := os.Remove(tempPath); errRemove != nil && !os.IsNotExist(errRemove) {
+				log.WithError(errRemove).Warn("failed to remove temp latest request log file")
+			}
+		}
+	}()
+
+	if _, errCopy := io.Copy(tempFile, source); errCopy != nil {
+		if errClose := tempFile.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to close temp latest request log file")
+		}
+		return errCopy
+	}
+	if errChmod := tempFile.Chmod(0644); errChmod != nil {
+		if errClose := tempFile.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to close temp latest request log file")
+		}
+		return errChmod
+	}
+	if errClose := tempFile.Close(); errClose != nil {
+		return errClose
+	}
+	if errRename := os.Rename(tempPath, destPath); errRename != nil {
+		return errRename
+	}
+	cleanupTemp = false
+	return nil
 }
 
 // asyncWriter runs in a goroutine to buffer chunks from the channel.

@@ -566,7 +566,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Root endpoint
-	s.engine.GET("/", func(c *gin.Context) {
+	s.engine.GET("/routers", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "CLI Proxy API Server",
 			"endpoints": []string{
@@ -575,6 +575,10 @@ func (s *Server) setupRoutes() {
 				"GET /v1/models",
 			},
 		})
+	})
+
+	s.engine.GET("/", func(c *gin.Context) {
+		c.Redirect(302, "/management.html")
 	})
 
 	// OAuth callback endpoints (reuse main server port)

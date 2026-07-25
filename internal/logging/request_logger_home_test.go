@@ -222,6 +222,55 @@ func TestFileRequestLogger_LogRequestWithSourcesWritesLocalLogAndCleansParts(t *
 	if !bytes.Contains(raw, []byte("Event: websocket.request")) || !bytes.Contains(raw, []byte("Event: websocket.response")) {
 		t.Fatalf("merged websocket events missing: %s", string(raw))
 	}
+
+	latestRaw, errLatest := os.ReadFile(filepath.Join(logsDir, latestRequestLogFilename))
+	if errLatest != nil {
+		t.Fatalf("read latest request log: %v", errLatest)
+	}
+	if !bytes.Contains(latestRaw, []byte("=== WEBSOCKET TIMELINE ===")) {
+		t.Fatalf("latest request log missing websocket timeline: %s", string(latestRaw))
+	}
+}
+
+func TestFileRequestLogger_LogRequestUpdatesLatestResultLog(t *testing.T) {
+	logsDir := t.TempDir()
+	logger := NewFileRequestLogger(true, logsDir, "", 0)
+
+	errLog := logger.LogRequest(
+		"/v1/chat/completions",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`),
+		http.StatusOK,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"choices":[{"message":{"content":"hi"}}]}`),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		"req-result-1",
+		time.Now(),
+		time.Now(),
+	)
+	if errLog != nil {
+		t.Fatalf("LogRequest error: %v", errLog)
+	}
+
+	latestRaw, errLatest := os.ReadFile(filepath.Join(logsDir, latestRequestLogFilename))
+	if errLatest != nil {
+		t.Fatalf("read latest request log: %v", errLatest)
+	}
+	for _, want := range [][]byte{
+		[]byte("=== REQUEST BODY ==="),
+		[]byte(`"model":"test-model"`),
+		[]byte("=== RESPONSE ==="),
+		[]byte(`"content":"hi"`),
+	} {
+		if !bytes.Contains(latestRaw, want) {
+			t.Fatalf("latest request log missing %q: %s", string(want), string(latestRaw))
+		}
+	}
 }
 
 func TestFileRequestLogger_HomeEnabled_ForwardsSourceLogAndCleansParts(t *testing.T) {
@@ -346,6 +395,52 @@ func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) 
 	}
 	if got.RequestLog == "" {
 		t.Fatalf("request_log empty, want non-empty")
+	}
+}
+
+func TestFileRequestLogger_LogStreamingRequestUpdatesLatestResultLog(t *testing.T) {
+	logsDir := t.TempDir()
+	logger := NewFileRequestLogger(true, logsDir, "", 0)
+
+	writer, errLog := logger.LogStreamingRequest(
+		"/v1/responses",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"input":"hello"}`),
+		"stream-result-1",
+	)
+	if errLog != nil {
+		t.Fatalf("LogStreamingRequest error: %v", errLog)
+	}
+
+	if errStatus := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); errStatus != nil {
+		t.Fatalf("WriteStatus error: %v", errStatus)
+	}
+	if errAPIRequest := writer.WriteAPIRequest([]byte("=== API REQUEST 1 ===\nBody: upstream request\n")); errAPIRequest != nil {
+		t.Fatalf("WriteAPIRequest error: %v", errAPIRequest)
+	}
+	if errAPIResponse := writer.WriteAPIResponse([]byte("=== API RESPONSE 1 ===\nBody: upstream response\n")); errAPIResponse != nil {
+		t.Fatalf("WriteAPIResponse error: %v", errAPIResponse)
+	}
+	writer.WriteChunkAsync([]byte("data: stream result\n\n"))
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("Close error: %v", errClose)
+	}
+
+	latestRaw, errLatest := os.ReadFile(filepath.Join(logsDir, latestRequestLogFilename))
+	if errLatest != nil {
+		t.Fatalf("read latest request log: %v", errLatest)
+	}
+	for _, want := range [][]byte{
+		[]byte("=== REQUEST BODY ==="),
+		[]byte(`"input":"hello"`),
+		[]byte("=== API REQUEST 1 ==="),
+		[]byte("upstream response"),
+		[]byte("data: stream result"),
+	} {
+		if !bytes.Contains(latestRaw, want) {
+			t.Fatalf("latest request log missing %q: %s", string(want), string(latestRaw))
+		}
 	}
 }
 
