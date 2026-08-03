@@ -153,6 +153,53 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 	}
 }
 
+func TestShouldLogRequest(t *testing.T) {
+	tests := []struct {
+		name   string
+		req    *http.Request
+		marker string
+		want   bool
+	}{
+		{
+			name: "nil request",
+			req:  nil,
+			want: false,
+		},
+		{
+			name: "proxy api request logs",
+			req:  httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+			want: true,
+		},
+		{
+			name: "management request without dev frontend marker skips",
+			req:  httptest.NewRequest(http.MethodPost, "/v0/management/config", nil),
+			want: false,
+		},
+		{
+			name:   "management request with vite dev frontend marker logs",
+			req:    httptest.NewRequest(http.MethodPost, "/v0/management/config", nil),
+			marker: "vite",
+			want:   true,
+		},
+		{
+			name:   "management request marker is case insensitive",
+			req:    httptest.NewRequest(http.MethodGet, "/management.html", nil),
+			marker: "VITE",
+			want:   true,
+		},
+	}
+
+	for i := range tests {
+		if tests[i].marker != "" {
+			tests[i].req.Header.Set(devFrontendRequestHeader, tests[i].marker)
+		}
+		got := shouldLogRequest(tests[i].req)
+		if got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
 func TestAttachRequestLogSourcesUsesLoggerLogsDir(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

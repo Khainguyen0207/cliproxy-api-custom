@@ -17,7 +17,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
-const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
+const (
+	devFrontendRequestHeader                   = "X-CPA-Dev-Frontend"
+	devFrontendRequestHeaderValue              = "vite"
+	maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
+)
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
@@ -35,13 +39,13 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		path := c.Request.URL.Path
-		if !shouldLogRequest(path) {
+		if !shouldLogRequest(c.Request) {
 			c.Next()
 			return
 		}
 
-		loggerEnabled := logger.IsEnabled()
+		forceRequestLog := isDevFrontendManagementRequest(c.Request)
+		loggerEnabled := logger.IsEnabled() || forceRequestLog
 
 		// Capture request information
 		requestInfo, err := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request))
@@ -54,6 +58,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
+		wrapper.forceLog = forceRequestLog
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
 		}
@@ -234,12 +239,24 @@ func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
 }
 
 // shouldLogRequest determines whether the request should be logged.
-// It skips management endpoints to avoid leaking secrets but allows
-// all other routes, including module-provided ones, to honor request-log.
-func shouldLogRequest(path string) bool {
-	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
+// It skips management endpoints to avoid leaking secrets, except when the
+// local Vite dev frontend proxy marks the request for full debugging.
+func shouldLogRequest(req *http.Request) bool {
+	if req == nil || req.URL == nil {
 		return false
 	}
 
+	path := req.URL.Path
+	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
+		return isDevFrontendManagementRequest(req)
+	}
+
 	return true
+}
+
+func isDevFrontendManagementRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(req.Header.Get(devFrontendRequestHeader)), devFrontendRequestHeaderValue)
 }

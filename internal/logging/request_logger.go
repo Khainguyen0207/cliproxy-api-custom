@@ -39,6 +39,7 @@ const (
 	APIResponseSourceContextKey          = "API_RESPONSE_SOURCE"
 	APIResponseCapturedContextKey        = "API_RESPONSE_CAPTURED"
 	APIWebsocketTimelineSourceContextKey = "API_WEBSOCKET_TIMELINE_SOURCE"
+	latestRequestLogFilename             = "result.log"
 )
 
 type homeRequestLogClient interface {
@@ -696,6 +697,11 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 			log.WithError(errCleanup).Warn("failed to clean up old error logs")
 		}
 	}
+	if l.enabled {
+		if _, errFinalize := finalizeRequestLog(filePath, responseToWrite, requestID, requestTimestamp); errFinalize != nil {
+			return fmt.Errorf("failed to finalize request log: %w", errFinalize)
+		}
+	}
 
 	return nil
 }
@@ -759,6 +765,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		url:              url,
 		method:           method,
 		timestamp:        time.Now(),
+		requestID:        strings.TrimSpace(requestID),
 		requestHeaders:   requestHeaders,
 		requestBodyPath:  requestBodyPath,
 		responseBodyPath: responseBodyPath,
@@ -1647,6 +1654,9 @@ type FileStreamingLogWriter struct {
 	// timestamp is captured when the streaming log is initialized.
 	timestamp time.Time
 
+	// requestID is the optional request ID used for fallback log naming.
+	requestID string
+
 	// requestHeaders stores the request headers.
 	requestHeaders map[string][]string
 
@@ -1854,8 +1864,127 @@ func (w *FileStreamingLogWriter) Close() error {
 			writeErr = errClose
 		}
 	}
+	if writeErr == nil {
+		responseBody, errResponseBody := os.ReadFile(w.responseBodyPath)
+		if errResponseBody != nil {
+			writeErr = errResponseBody
+		} else {
+			_, writeErr = finalizeRequestLog(w.logFilePath, responseBody, w.requestID, w.timestamp)
+		}
+	}
 
 	w.cleanupTempFiles()
+	return writeErr
+}
+
+func finalizeRequestLog(sourcePath string, response []byte, requestID string, requestTimestamp time.Time) (string, error) {
+	sourcePath = strings.TrimSpace(sourcePath)
+	if sourcePath == "" {
+		return "", nil
+	}
+	if requestTimestamp.IsZero() {
+		requestTimestamp = time.Now()
+	}
+
+	baseDir := filepath.Dir(sourcePath)
+	dayDir := filepath.Join(baseDir, requestTimestamp.Format("02_01_2006"))
+	if errMkdir := os.MkdirAll(dayDir, 0755); errMkdir != nil {
+		return "", errMkdir
+	}
+
+	responseJSON := bytes.TrimSpace(response)
+	responseID := responseIDFromJSON(responseJSON)
+	nameID := responseID
+	if nameID == "" {
+		nameID = strings.TrimSpace(requestID)
+	}
+	if nameID == "" {
+		nameID = strings.TrimSuffix(filepath.Base(sourcePath), filepath.Ext(sourcePath))
+	}
+
+	filename := fmt.Sprintf("%s_%s.log", sanitizeRequestLogID(nameID), requestTimestamp.Format("2006-01-02T150405"))
+	destPath := uniqueRequestLogPath(filepath.Join(dayDir, filename))
+	if filepath.Clean(sourcePath) != filepath.Clean(destPath) {
+		if errRename := os.Rename(sourcePath, destPath); errRename != nil {
+			return "", errRename
+		}
+	}
+
+	if len(responseJSON) > 0 && json.Valid(responseJSON) {
+		if errAppend := appendDailyResultLog(dayDir, responseJSON); errAppend != nil {
+			return "", errAppend
+		}
+	}
+
+	return destPath, nil
+}
+
+func responseIDFromJSON(responseJSON []byte) string {
+	if len(responseJSON) == 0 || !json.Valid(responseJSON) {
+		return ""
+	}
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if errUnmarshal := json.Unmarshal(responseJSON, &payload); errUnmarshal != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.ID)
+}
+
+func sanitizeRequestLogID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "request"
+	}
+	var builder strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('-')
+		}
+	}
+	out := strings.Trim(builder.String(), "-_.")
+	if out == "" {
+		return "request"
+	}
+	return out
+}
+
+func uniqueRequestLogPath(path string) string {
+	if _, errStat := os.Stat(path); os.IsNotExist(errStat) {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s-%d%s", base, i, ext)
+		if _, errStat := os.Stat(candidate); os.IsNotExist(errStat) {
+			return candidate
+		}
+	}
+}
+
+func appendDailyResultLog(dayDir string, responseJSON []byte) error {
+	resultPath := filepath.Join(dayDir, latestRequestLogFilename)
+	file, errOpen := os.OpenFile(resultPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if errOpen != nil {
+		return errOpen
+	}
+	writeErr := writeLogPart(file, responseJSON, false)
+	if errClose := file.Close(); errClose != nil {
+		if writeErr == nil {
+			writeErr = errClose
+		}
+	}
 	return writeErr
 }
 

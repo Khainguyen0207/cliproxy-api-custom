@@ -566,7 +566,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Root endpoint
-	s.engine.GET("/", func(c *gin.Context) {
+	s.engine.GET("/routers", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "CLI Proxy API Server",
 			"endpoints": []string{
@@ -575,6 +575,10 @@ func (s *Server) setupRoutes() {
 				"GET /v1/models",
 			},
 		})
+	})
+
+	s.engine.GET("/", func(c *gin.Context) {
+		c.Redirect(302, "/management.html")
 	})
 
 	// OAuth callback endpoints (reuse main server port)
@@ -854,6 +858,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
 		mgmt.GET("/request-error-logs", s.mgmt.GetRequestErrorLogs)
 		mgmt.GET("/request-error-logs/:name", s.mgmt.DownloadRequestErrorLog)
+		mgmt.GET("/log-detail-requests", s.mgmt.GetLogDetailRequests)
+		mgmt.GET("/log-detail-requests/:day/:name", s.mgmt.DownloadLogDetailRequest)
 		mgmt.GET("/request-log-by-id/:id", s.mgmt.GetRequestLogByID)
 		mgmt.GET("/request-log", s.mgmt.GetRequestLog)
 		mgmt.PUT("/request-log", s.mgmt.PutRequestLog)

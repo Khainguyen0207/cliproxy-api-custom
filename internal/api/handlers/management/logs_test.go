@@ -665,6 +665,86 @@ func TestGetLogsLoggingDisabledKeepsBadRequest(t *testing.T) {
 	}
 }
 
+func TestGetLogDetailRequestsListsDailyFilesAndResults(t *testing.T) {
+	dir := t.TempDir()
+	dayDir := filepath.Join(dir, "27_07_2026")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("create day dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dayDir, "resp_b_2026-07-27T222106.log"), []byte("detail b"), 0o644); err != nil {
+		t.Fatalf("write detail b: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dayDir, "resp_a_2026-07-27T222105.log"), []byte("detail a"), 0o644); err != nil {
+		t.Fatalf("write detail a: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dayDir, "result.log"), []byte("{\"id\":\"resp_a\"}\n{\"id\":\"resp_b\"}\nnot-json\n"), 0o644); err != nil {
+		t.Fatalf("write result log: %v", err)
+	}
+
+	status, body := performGetLogDetailRequestsRaw(t, newLogsTestHandler(dir, true), "/v0/management/log-detail-requests?day=27_07_2026")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", status, body)
+	}
+
+	var resp struct {
+		Day   string `json:"day"`
+		Files []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"files"`
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Day != "27_07_2026" {
+		t.Fatalf("day = %q, want 27_07_2026", resp.Day)
+	}
+	if len(resp.Files) != 2 {
+		t.Fatalf("files = %d, want 2: %s", len(resp.Files), body)
+	}
+	if resp.Files[0].Name != "resp_b_2026-07-27T222106.log" || resp.Files[1].Name != "resp_a_2026-07-27T222105.log" {
+		t.Fatalf("files order = %#v", resp.Files)
+	}
+	if resp.Files[0].Path != "/v0/management/log-detail-requests/27_07_2026/resp_b_2026-07-27T222106.log" {
+		t.Fatalf("download path = %q", resp.Files[0].Path)
+	}
+	if len(resp.Results) != 2 || resp.Results[0]["id"] != "resp_a" || resp.Results[1]["id"] != "resp_b" {
+		t.Fatalf("results = %#v", resp.Results)
+	}
+}
+
+func TestGetLogDetailRequestsRejectsInvalidDay(t *testing.T) {
+	status, body := performGetLogDetailRequestsRaw(t, newLogsTestHandler(t.TempDir(), true), "/v0/management/log-detail-requests?day=../logs")
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", status, http.StatusBadRequest, body)
+	}
+}
+
+func TestDownloadLogDetailRequest(t *testing.T) {
+	dir := t.TempDir()
+	dayDir := filepath.Join(dir, "27_07_2026")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("create day dir: %v", err)
+	}
+	name := "resp_a_2026-07-27T222105.log"
+	if err := os.WriteFile(filepath.Join(dayDir, name), []byte("detail body"), 0o644); err != nil {
+		t.Fatalf("write detail: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/log-detail-requests/27_07_2026/"+name, nil)
+	c.Params = gin.Params{{Key: "day", Value: "27_07_2026"}, {Key: "name", Value: name}}
+	newLogsTestHandler(dir, true).DownloadLogDetailRequest(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "detail body" {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+}
+
 func mustEncodeRawCursor(t *testing.T, cursor logCursor) string {
 	t.Helper()
 	raw, err := json.Marshal(cursor)
@@ -710,6 +790,15 @@ func performGetLogsRaw(t *testing.T, h *Handler, target string) (int, string) {
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
 	h.GetLogs(c)
+	return rec.Code, rec.Body.String()
+}
+
+func performGetLogDetailRequestsRaw(t *testing.T, h *Handler, target string) (int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
+	h.GetLogDetailRequests(c)
 	return rec.Code, rec.Body.String()
 }
 

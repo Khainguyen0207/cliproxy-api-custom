@@ -256,6 +256,175 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"files": files})
 }
 
+// GetLogDetailRequests lists daily request detail logs and result entries.
+func (h *Handler) GetLogDetailRequests(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+
+	day := strings.TrimSpace(c.Query("day"))
+	if day == "" {
+		day = time.Now().Format("02_01_2006")
+	}
+	if !isRequestLogDay(day) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid day"})
+		return
+	}
+
+	dayDir := filepath.Join(dir, day)
+	entries, err := os.ReadDir(dayDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusOK, gin.H{"day": day, "files": []any{}, "results": []any{}})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list request detail logs: %v", err)})
+		return
+	}
+
+	type detailLog struct {
+		Name     string `json:"name"`
+		Size     int64  `json:"size"`
+		Modified int64  `json:"modified"`
+		Path     string `json:"path"`
+	}
+
+	files := make([]detailLog, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "result.log" || !strings.HasSuffix(name, ".log") || strings.ContainsAny(name, `/\`) {
+			continue
+		}
+		info, errInfo := entry.Info()
+		if errInfo != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log info for %s: %v", name, errInfo)})
+			return
+		}
+		files = append(files, detailLog{
+			Name:     name,
+			Size:     info.Size(),
+			Modified: info.ModTime().Unix(),
+			Path:     "/v0/management/log-detail-requests/" + day + "/" + name,
+		})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Name > files[j].Name })
+
+	results, errResults := readDailyRequestResults(filepath.Join(dayDir, "result.log"))
+	if errResults != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read daily result log: %v", errResults)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"day": day, "files": files, "results": results})
+}
+
+func isRequestLogDay(day string) bool {
+	if len(day) != len("02_01_2006") {
+		return false
+	}
+	_, err := time.Parse("02_01_2006", day)
+	return err == nil
+}
+
+func readDailyRequestResults(path string) ([]json.RawMessage, error) {
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		if os.IsNotExist(errOpen) {
+			return []json.RawMessage{}, nil
+		}
+		return nil, errOpen
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	results := []json.RawMessage{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, logScannerInitialBuffer), logScannerMaxBuffer)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || !json.Valid(line) {
+			continue
+		}
+		results = append(results, append(json.RawMessage(nil), line...))
+	}
+	if errScan := scanner.Err(); errScan != nil {
+		return nil, errScan
+	}
+	return results, nil
+}
+
+// DownloadLogDetailRequest downloads a request detail log from a daily folder.
+func (h *Handler) DownloadLogDetailRequest(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+
+	day := strings.TrimSpace(c.Param("day"))
+	if !isRequestLogDay(day) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid day"})
+		return
+	}
+	name := strings.TrimSpace(c.Param("name"))
+	if name == "" || strings.ContainsAny(name, `/\`) || name == "result.log" || !strings.HasSuffix(name, ".log") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file name"})
+		return
+	}
+
+	dirAbs, errAbs := filepath.Abs(filepath.Join(dir, day))
+	if errAbs != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
+		return
+	}
+	fullPath := filepath.Clean(filepath.Join(dirAbs, name))
+	prefix := dirAbs + string(os.PathSeparator)
+	if !strings.HasPrefix(fullPath, prefix) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
+		return
+	}
+
+	info, errStat := os.Stat(fullPath)
+	if errStat != nil {
+		if os.IsNotExist(errStat) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
+		return
+	}
+	if info.IsDir() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
+		return
+	}
+
+	c.FileAttachment(fullPath, name)
+}
+
 // GetRequestLogByID finds and downloads a request log file by its request ID.
 // The ID is matched against the suffix of log file names (format: *-{requestID}.log).
 func (h *Handler) GetRequestLogByID(c *gin.Context) {
